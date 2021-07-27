@@ -1,688 +1,397 @@
-#include <windows.h>
 #include <stdio.h>
 #include <math.h>
-#include <SDL.h>
-#include <SDL_thread.h>
-#include <ctime>
-#include <vector>
+#include <algorithm>
+#include "xoshiro256ss.h"
 
+namespace {
 
-SDL_Surface *screen;
+using Real = long double;
+using ImageReal = float;
 
-const int screen_width = 500, screen_height = 500;
-bool stop = false;
-
-#include "sdl_stuff.cpp"
-#include "random.cpp"
-
-
-const int max_orbit_length = 50000;
-int oob;
-
-
-class complex
-{
-public:
-	long double a,b,c,d;
-
-	complex()
-	{
-		a = b = c = d = 0;
-	}
-
-	complex(long double aa,long double bb,long double cc,long double dd)
-	{
-		a = aa;
-		b = bb;
-		c = cc;
-		d = dd;
-	}	
+struct TargetProperties {
+    Real x;
+    Real y;
+    Real zoom;
+};
+struct BitmapProperties {
+    int height;
+    int width;
 };
 
-complex orbit[max_orbit_length];
-float image_buffer[screen_width][screen_height][3];
-int olen=0;
+constexpr TargetProperties target1 = { -0.4, 0, 0.32 };  // the full set
+constexpr TargetProperties target2 = { -1.25275, -0.343, 250 };
+constexpr TargetProperties target3 = { -0.1592, -1.0317, 80.5 };
+constexpr TargetProperties target4 = { -0.529854097, -0.667968575, 80.5 };
+constexpr TargetProperties target5 = { -0.657560793, 0.467732884, 70.5 };
+constexpr TargetProperties target6 = { -1.185768799, 0.302592593, 90.5 };
+constexpr TargetProperties target7 = { 0.443108035, 0.345012263, 4000 };
+constexpr TargetProperties target8 = { -0.647663050, 0.380700836, 1275 };
+constexpr TargetProperties target9 = { -0.0443594, -0.986749, 88.2 };  // steckles.com sample image
 
+constexpr TargetProperties target = target1;
+constexpr BitmapProperties bitmap = { 640, 480 };
 
-/***********************************************************************/
-/*                                                                     */
-/* All this stuff is support code, not directly related to the         */
-/* Metropolis-Hastings algorithm                                       */
-/*                                                                     */
-/***********************************************************************/
+constexpr int max_orbit_length = 50000;
 
+xoshiro256ss prng;
 
-long double dist(complex &a, complex &b)
+Real random(Real lo, Real hi)
 {
-	return ((a.c-b.c)*(a.c-b.c)+(a.d-b.d)*(a.d-b.d));
+    assert(lo <= hi);
+    constexpr Real scale = Real(1) / Real(-1uLL);
+    Real r = Real(prng()) * scale;
+    return lo + r * (hi - lo);
 }
 
+struct Complex {
+    Real a = 0;
+    Real b = 0;
+    Real c = 0;
+    Real d = 0;
 
-void NewRandom(complex &c)
+    explicit Complex() = default;
+    constexpr explicit Complex(Real a, Real b, Real c, Real d) : a(a), b(b), c(c), d(d) {}
+
+    constexpr Real mag2() const { return c*c + d*d; }
+    Real dist2(Real cp, Real dp) const { return (c-cp)*(c-cp) + (d-dp)*(d-dp); }
+};
+
+struct ImageCoord {
+    int y;
+    int x;
+    constexpr explicit ImageCoord(int x, int y) : y(y), x(x) {}
+    bool isOnScreen() const { return (0 <= y && y < bitmap.height && 0 <= x && x < bitmap.width); }
+};
+
+ImageCoord Project(const Complex &s)
 {
-	while(1)
-	{
-		c = complex(0,0,random(-2,2),random(-2,2));
-
-		if(dist(c, complex(0,0,0,0))<4)
-			return;
-	}
-}	
-
-
-void RandomRange(complex &c, long double r)
-{
-	while(1)
-	{
-		c = complex(0,0,random(-r,r),random(-r,r));
-
-		if(dist(c, complex(0,0,0,0))<r*r)
-			return;
-	}
-}	
-
-void InitializeImageBuffer(void)
-{
-	for(int x=0;x<screen_width;x++)
-		for(int y=0;y<screen_height;y++)
-		{
-			image_buffer[x][y][0] = image_buffer[x][y][1] = image_buffer[x][y][2] = 0;
-		}
+    // Notice that the image is rotated 90 degrees compared to the original complex plane.
+    // Negative real components (target.x) turn into upward displacements (small coord.y).
+    return ImageCoord(
+        int((s.b - target.y) * target.zoom * bitmap.height + (bitmap.width / 2)),
+        int((s.a - target.x) * target.zoom * bitmap.height + (bitmap.height / 2))
+    );
 }
 
-void Clamp(int &m)
+constexpr Complex Unproject(ImageCoord p)
 {
-	if(m<0)
-		m=0;
-
-	if(m>255)
-		m=255;
+    return Complex(
+        0, 0,
+        (p.y - (bitmap.height / 2)) / (target.zoom * bitmap.height) + target.x,
+        (p.x - (bitmap.width / 2)) / (target.zoom * bitmap.height) + target.y
+    );
 }
 
+Complex orbit[max_orbit_length];
+int olen = 0;
 
-float bias(float x, float val)
+ImageReal (&image_buffer)[3][bitmap.height][bitmap.width] = *new ImageReal[1][3][bitmap.height][bitmap.width]{};
+
+Complex RandomInRadiusAround(Real x, Real y, Real r)
 {
-	return (val > 0) ? pow(x,log(val) / log(0.5)) : 0;
+    const auto r2 = r * r;
+    while (true) {
+        Complex c = Complex(0, 0, random(-r,r), random(-r,r));
+        if (c.mag2() < r2) {
+            c.c += x;
+            c.d += y;
+            return c;
+        }
+    }
 }
 
-float gain(float x, float val )
+// This function is essentially gamma-correction at both ends of the range [0,1].
+// It applies the inverse of a sigmoid function to artificially increase the
+// brightness of small-but-not-zero values and decrease the brightness of
+// large-but-not-1 values, thus compressing the output into the middle of the range.
+// However, this still tends to make things too dark, so after that,
+// we multiply everything by two (saturating at 1.0).
+// Then, we multiply by 256 to get a final pixel value.
+//
+unsigned char GainCorrect(ImageReal x)
 {
-	return 0.5 * ((x < 0.5) ? bias (2*x, 1-val): (2 - bias(2-2*x,1-val)));
+    auto bend = [](ImageReal x) {
+        assert(0 <= x && x <= 0.5);
+        ImageReal y = pow(2*x, 0.3219280948873623) / 2;
+        assert(0 <= y && y <= 0.5);
+        return y;
+    };
+    ImageReal gain_adjusted = (x <= 0.5) ? bend(x) : (1 - bend(1-x));
+    ImageReal brightened = gain_adjusted * 2;  // This factor seems unexplained.
+    int m = brightened * 256;
+    return (m < 0) ? 0 : (m < 255) ? m : 255;
 }
 
-
-void DrawBuffer(void)
+void OutputPPM(const char *fname, ImageReal max0, ImageReal max1, ImageReal max2)
 {
-
-	int x, y;
-
-	long double rr=0, rg=0, rb=0;
-
-
-
-	for(x=0;x<screen_width;x++)
-		for(y=0;y<screen_height;y++)
-		{
-			if(image_buffer[x][y][0]>rr)
-				rr = image_buffer[x][y][0];
-
-			if(image_buffer[x][y][1]>rg)
-				rg = image_buffer[x][y][1];
-
-			if(image_buffer[x][y][2]>rb)
-				rb = image_buffer[x][y][2];
-		}
-
-	Slock(screen);
-
-	for(x=0;x<screen_width;x++)
-		for(y=0;y<screen_height;y++)
-		{		
-			int r = gain(image_buffer[x][y][0]/rr,0.2f)*512;
-			int g = gain(image_buffer[x][y][1]/rg,0.2f)*512;
-			int b = gain(image_buffer[x][y][2]/rb,0.2f)*512;
-
-
-			Clamp(r);
-			Clamp(g);
-			Clamp(b);
-			DrawPixel(screen, x, y, r,g,b);		
-		}
-
-	Sulock(screen);
-	SDL_Flip(screen);
+    FILE *fp = fopen(fname, "wb");
+    assert(fp != nullptr);
+    fprintf(fp, "P6\n%d %d\n255\n", bitmap.width, bitmap.height);
+    for (int y=0; y < bitmap.height; ++y) {
+        for (int x=0; x < bitmap.width; ++x) {
+            unsigned char rgb[3] = {
+                GainCorrect(image_buffer[0][y][x] / max0),
+                GainCorrect(image_buffer[1][y][x] / max1),
+                GainCorrect(image_buffer[2][y][x] / max2),
+            };
+            fwrite(rgb, 1, 3, fp);
+        }
+    }
+    fclose(fp);
 }
 
-
-
-
-
-/***********************************************************************/
-/*                                                                     */
-/* The image coordinates and magnification for the image to be         */
-/* generated.                                                          */
-/*                                                                     */
-/***********************************************************************/
-
-long double zx = -1.25275, zy = -0.343, zoom = 250;
-
-//long double zx = -0.1592, zy = -1.0317, zoom = 80.5;
-
-//long double zx = -0.529854097, zy = -0.667968575, zoom = 80.5;
-
-//long double zx = -0.657560793, zy = 0.467732884, zoom = 70.5;
-
-//long double zx = -1.185768799, zy = 0.302592593, zoom = 90.5;
-
-//ng double zx = 0.443108035, zy = 0.345012263, zoom = 4000;
-
-//long double zx = -0.647663050, zy = 0.380700836, zoom = 1275;
-
-/***********************************************************************/
-/*                                                                     */
-/* Classic run-of-the-mill Mandelbrot code                             */
-/*                                                                     */
-/***********************************************************************/
-
-bool Evaluate(complex &s, int it)
+void OutputPGM(const char *fname, int c, ImageReal cmax)
 {
-	olen = 0;
-
-	long double	a = s.a,
-			b = s.b,
-			t;
-
-	oob = it;
-	for(int i=0;i<it;i++)
-	{
-		if(stop)
-			break;
-
-		t=a*a - b*b + s.c;
-		b=2.0*a*b + s.d;
-		a=t;
-
-		if(a*a + b*b>4.0)
-			return true;
-	
-		orbit[olen].a = a;
-		orbit[olen].b = b;
-		orbit[olen].c = s.c;
-		orbit[olen].d = s.d;
-
-		olen++;
-
-		if(olen>=max_orbit_length)
-			return false;
-	}
-
-	return false;
+    FILE *fp = fopen(fname, "wb");
+    assert(fp != nullptr);
+    fprintf(fp, "P5\n%d %d\n255\n", bitmap.width, bitmap.height);
+    for (int y=0; y < bitmap.height; ++y) {
+        for (int x=0; x < bitmap.width; ++x) {
+            unsigned char rgb[1] = {
+                GainCorrect(image_buffer[c][y][x] / cmax),
+            };
+            fwrite(rgb, 1, 1, fp);
+        }
+    }
+    fclose(fp);
 }
 
-
-/***********************************************************************/
-/*                                                                     */
-/* This could be replaced with a 3d projection, the algorithm should   */
-/* work equally well for the classic Buddhabrot and the 4d Buddhagram  */
-/*                                                                     */
-/***********************************************************************/
-
-void Project(complex &s, int &x, int &y)
+void DrawBuffer()
 {
-	x =  (((s.a-zx)*zoom)+0.5)*screen_width;
-	y =  (((s.b-zy)*zoom)+0.5)*screen_height;
+    printf("DrawBuffer!\n");
+    ImageReal max0 = 0.01;  // avoid div-by-zero on a completely black image
+    ImageReal max1 = 0.01;
+    ImageReal max2 = 0.01;
+    for (int y=0; y < bitmap.height; ++y) {
+        for (int x=0; x < bitmap.width; ++x) {
+            max0 = std::max(max0, image_buffer[0][y][x]);
+            max1 = std::max(max1, image_buffer[1][y][x]);
+            max2 = std::max(max2, image_buffer[2][y][x]);
+        }
+    }
+
+    OutputPPM("color.ppm", max0, max1, max2);
+    OutputPGM("red.pgm", 0, max0);
+    OutputPGM("green.pgm", 1, max1);
+    OutputPGM("blue.pgm", 2, max2);
 }
 
-
-void DrawOrbit(int c, long double g, complex *d_orbit, int len)
+constexpr Real computeEscapeMagnitude2()
 {
-	for(int i=0;i<len;i++)
-	{		int x,y;
-		Project(d_orbit[i], x, y);
-
-		if(x>=0&&x<screen_width && y>=0 && y<screen_height)
-			image_buffer[x][y][c]+=g;
-
-	}
-
+    Real m1 = Unproject(ImageCoord{0, 0}).mag2();
+    Real m2 = Unproject(ImageCoord{bitmap.width-1, 0}).mag2();
+    Real m3 = Unproject(ImageCoord{0, bitmap.height-1}).mag2();
+    Real m4 = Unproject(ImageCoord{bitmap.width-1, bitmap.height-1}).mag2();
+    Real result = 4.0;
+    if (result < m1) result = m1;
+    if (result < m2) result = m2;
+    if (result < m3) result = m3;
+    if (result < m4) result = m4;
+    return result;
 }
 
-/***********************************************************************/
-/*                                                                     */
-/* The contribution of each proposed mutation is proportional to the   */
-/* number of times points in its orbit pass through the screen         */
-/*                                                                     */
-/***********************************************************************/
-
-long double Contrib(long double q)
+Real computeEscapeMagnitude()
 {
-	long double contrib = 0;
-	int inside=0,i;
-
-	for(i=0;i<olen;i++)
-	{
-		int x,y;
-		Project(orbit[i], x, y);
-
-		if(x>=0&&x<screen_width && y>=0 && y<screen_height)
-			contrib++;
-	}		
-
-	return contrib/long double(olen);
+    return sqrt(computeEscapeMagnitude2());
 }
 
-long double TransitionProbability(long double q1, long double q2, long double olen1, long double olen2)
+bool Evaluate(const Complex &s, int it)
 {
-	return (1.f-(q1-olen1)/q1)/(1.f-(q2-olen2)/q2);
+    constexpr Real escape = computeEscapeMagnitude2();
+
+    assert(it <= max_orbit_length);
+    olen = 0;
+    Real a = s.a;
+    Real b = s.b;
+    for (int i=0; i < it; ++i) {
+        Real t = a*a - b*b + s.c;
+        b = 2*a*b + s.d;
+        a = t;
+        if (a*a + b*b > escape) {
+            return true;
+        }
+        orbit[olen++] = Complex(a, b, s.c, s.d);
+    }
+    return false;
 }
 
-
-/***********************************************************************/
-/*                                                                     */
-/* Returns a proposed mutation. Most of the mutations should be small, */
-/* but the occasional completely new point should be thrown in to      */
-/* maintain ergodicity.                                                */
-/*                                                                     */
-/***********************************************************************/
-complex Mutate(complex &c)
+void DrawOrbit(int c, const Complex *d_orbit, int len)
 {
-
-	if(random(0,5)<4)
-	{
-		complex n = c;
-
-		long double r1 = (1.f/zoom)*0.0001;
-		long double r2 = (1.f/zoom)*0.1;
-		long double phi = random(0,1)*2.f*3.1415926f;
-		long double r = r2* exp( -log(r2/r1) * random(0,1));
-
-		n.c += r*cos(phi);
-		n.d += r*sin(phi);
-
-		return n;
-	}
-	else
-	{
-		complex n = c;
-
-		NewRandom(n);
-		return n;
-	}
-	
+    for (int i=0; i < len; ++i) {
+        ImageCoord p = Project(d_orbit[i]);
+        if (p.isOnScreen()) {
+            image_buffer[c][p.y][p.x] += ImageReal(1);
+            if (target.y == 0) {
+                // If the region being graphed is symmetrical, then make the image symmetrical too.
+                image_buffer[c][p.y][bitmap.width - p.x - 1] += ImageReal(1);
+            }
+        }
+    }
 }
 
+Real Contrib()
+{
+    Real contrib = 0;
+    for (int i=0; i < olen; ++i) {
+        ImageCoord p = Project(orbit[i]);
+        if (p.isOnScreen()) {
+            contrib += 1;
+        }
+    }
+    return contrib / Real(olen);
+}
+
+Real TransitionProbability(Real q1, Real q2, Real olen1, Real olen2)
+{
+    return (olen1 * q2) / (olen2 * q1);
+}
+
+// Most mutations should be small,
+// but occasionally throw in a completely new point
+// to maintain ergodicity.
+//
+Complex Mutate(const Complex &c)
+{
+    static int counter = 5;
+    if (--counter != 0) {
+        Complex n = c;
+        Real r2 = (1.L / target.zoom)*0.1;
+        Real phi = random(0, 2*M_PI);
+        Real r = r2 * exp(-random(0, 6.9077));
+        n.c += r * cos(phi);
+        n.d += r * sin(phi);
+        return n;
+    } else {
+        counter = 5;
+        return RandomInRadiusAround(0, 0, computeEscapeMagnitude());
+    }
+}
 
 /***********************************************************************/
 /*                                                                     */
 /* Recursively find a point whose orbit passes through the screen.     */
-/* Not required per-se, but it's  alot faster than just trying random  */
+/* Not required per-se, but it's a lot faster than just trying random  */
 /* samples over and over again until you find a good one, especially   */
 /* at higher zooms.                                                    */
 /*                                                                     */
 /***********************************************************************/
 
-bool FindInitialSample(complex &c, long double x, long double y, long double rad, int f)
+bool FindInitialSample(Complex &c, Real x, Real y, Real rad, int f)
 {
-
-	if(stop)
-		return false;
-
-	if(f>500)
-	{
-		return false;
-	}
-
-	complex ct = c, tmp, seed;
-
-	int m=-1,i;
-	long double closest = 1e20;
-
-	for(i=0;i<200;i++)
-	{
-		if(stop)
-			return false;
-
-		RandomRange(tmp,rad);
-		tmp.c += x;
-		tmp.d += y;
-
-		if(!Evaluate(tmp,50000))
-			continue;
-
-		if(Contrib(50000)>0.0f)
-		{
-			c = tmp;
-			return true;
-		}
-
-
-		for(int q=0;q<olen;q++)
-		{
-			if(stop)
-				return false;
-
-			long double d = dist(orbit[q],complex(0,0,zx,zy));
-
-			if(d<closest)
-				m = q,
-				closest = d,
-				seed = tmp;
-		}
-	}
-
-	return FindInitialSample(c, seed.c, seed.d, rad/2.f,f+1);
-}
-
-
-
-/***********************************************************************/
-/*                                                                     */
-/* For the sake of comparison, this is the old, "stupid" buddhabrot    */
-/* algorithm.                                                          */
-/*                                                                     */
-/***********************************************************************/
-
-void BuddhaClassic(void)
-{
-	int m=0;
-
-	while(!stop)
-	{
-		complex z;
-		
-		RandomRange(z,2);
-
-		if(Evaluate(z,50000))
-		{
-			DrawOrbit(0,1,orbit,olen);
-
-			if(m%6000==0)
-			{
-				DrawBuffer();	
-				if(!stop)
-				{
-					char new_title[1024];
-					sprintf(new_title,"Plotted %i orbits....");
-					SDL_WM_SetCaption(new_title, NULL);
-				}
-			}
-		}
-
-		m++;
-	}
-}
-
-/***********************************************************************/
-/*                                                                     */
-/* Start metrobrot                                                     */
-/*                                                                     */ 
-/***********************************************************************/
-
-
-/***********************************************************************/
-/*                                                                     */
-/* As many disperate part of the Mandelbrot set can produce orbits     */
-/* that pass through the screen, an optimization is to run multiple    */
-/* copies of the algorithm from different starting values, that way    */
-/* you're less likely to miss important orbits early on.               */
-/*                                                                     */ 
-/***********************************************************************/
-const int metro_threads = 30;
-
-
-int accepted=0, rejected=0;
-
-std::vector<complex> z_samples;
-std::vector<long double> c_samples;
-long double l[metro_threads][3], o[metro_threads][3];
-complex n_sample,c_sample;
-long double c_contrib, n_contrib;
-
-
-
-void BuildInitialSamplePoints(void)
-{
-	for(int i=0;i<metro_threads;i++)
-	{
-		if(stop)
-			break;
-
-		l[i][0] = o[i][0] = l[i][1] = o[i][1] = l[i][2] = o[i][2] = 1;
- 
-		if(!stop)
-		{
-			char new_title[1024];
-			sprintf(new_title,"Finding init sample %i",i);
-			SDL_WM_SetCaption(new_title, NULL);
-		}
-
-		complex m;
-		if(!FindInitialSample(m, 0, 0, 2.f, 0))
-		{
-			printf("Couldn't find seed %i!\n",i);
-			continue;
-		}
-
-		Evaluate(m,50000);
-		z_samples.push_back(m);
-		c_samples.push_back(Contrib(50000));
-	}
-}
-
-
-/***********************************************************************/
-/*                                                                     */
-/* In orber to avoid any bias that the initial sample points may       */
-/* have, we should run the algorithm for a few thousand iterations     */
-/* so that it "forgets".                                               */
-/*                                                                     */ 
-/***********************************************************************/
-
-
-
-void WarmUp(void)
-{
-	for(int ss=0;ss<z_samples.size();ss++)
-	{
-		if(stop)
-			break;
-
-		if(!stop)
-		{
-			char new_title[1024];
-			sprintf(new_title,"Warming up init sample %i of %i",ss,z_samples.size());
-			SDL_WM_SetCaption(new_title, NULL);
-		}
-
-		for(int e=0;e<10000;e++)
-		{
-
-			for(int i=0;i<3;i++)
-			{
-				int it_length = 50*pow(10,i+1);
-
-				if(stop)
-					break;
-		
-				n_sample = Mutate(z_samples[ss]);
-				
-				if(!Evaluate(n_sample,i*pow(10,it_length)))
-					continue;
-
-				n_contrib = Contrib(it_length);
-
-				if(n_contrib==0)
-					continue;
-
-
-				long double T1 = TransitionProbability(it_length, l[ss][i], olen, o[ss][i]);
-				long double T2 = TransitionProbability(l[ss][i], it_length,  o[ss][i], olen);
-
-				long double alpha = min(1.f,exp(log(n_contrib*T1)-log(c_samples[ss]*T2)));
-				long double R = random01();
-
-				if(alpha>R)
-				{
-					c_samples[ss] = n_contrib;
-					z_samples[ss] = n_sample;
-
-					l[ss][i] = it_length;
-					o[ss][i] = olen;
-				}	
-			}
-		}
-	}
-}
-
-/***********************************************************************/
-/*                                                                     */
-/* Finally, the good bits.                                             */
-/*                                                                     */ 
-/***********************************************************************/
-
-void RenderBuddhabrot(void)
-{
-	int m=0;
-	while(!stop)
-	{
-		for(int ss=0;ss<z_samples.size();ss++)
-		{
-			for(int i=0;i<3;i++)
-			{
-				int it_length = 50*pow(10,i+1);
-
-				
-				
-				n_sample = Mutate(z_samples[ss]);		
-
-
-				if(!Evaluate(n_sample,it_length))
-					continue;
-
-				n_contrib = Contrib(it_length);
-
-				if(n_contrib==0)
-					continue;
-
-
-				long double T1 = TransitionProbability(it_length, l[ss][i], olen, o[ss][i]);
-				long double T2 = TransitionProbability(l[ss][i], it_length,  o[ss][i], olen);
-
-				long double alpha = min(1.f,exp(log(n_contrib*T1)-log(c_samples[ss]*T2)));
-				long double R = random01();
-
-				
-
-				if(alpha>R)
-				{
-					c_samples[ss] = n_contrib;
-					z_samples[ss] = n_sample;
-
-					l[ss][i] = it_length;
-					o[ss][i] = olen;
-					accepted++;
-				
-					DrawOrbit(2-i,1,orbit,olen);
-				}
-				else
-				{
-					rejected++;
-				}
-
-				m++;
-				//Draw the image to the screen once in a while.
-				if(m%6000==0)
-				{
-					DrawBuffer();	
-					if(!stop)
-					{
-						char new_title[1024];
-						sprintf(new_title,"Plotted %i orbits (a:%i r:%i)....",m,accepted,rejected);
-						SDL_WM_SetCaption(new_title, NULL);
-					}
-				}				
-			}				
-		}		
-	}
-}
-
-int RenderThread(void *zuh)
-{	
-	bool inside = true;
-
-	//Find the inital sample points
-	BuildInitialSamplePoints();
-
-
-	if(c_samples.size()==0) //Just in case
-	{
-		printf("Oh noes!\n");
-		return 0;
-	}
-
-
-	WarmUp();
-
-	//Finally, start mutatin' away and plot us some fractal.
-	RenderBuddhabrot();
-	return 0;
-}
-
-
-
-
-int main(int argc, char *argv[])
-{
-	if ( SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO) < 0 )
-	{
-		MessageBox(NULL,"Unable to init SDL",SDL_GetError(),MB_OK);
-		SDL_Quit();
-		return 1;
-	}
-
-
-	init_genrand((unsigned)time(NULL));
-	InitializeImageBuffer();
- 
-
-	screen = SDL_SetVideoMode(screen_width,screen_height,32,SDL_HWSURFACE|SDL_DOUBLEBUF);
-	
-	if ( screen == NULL )
-	{
-		MessageBox(NULL,"Unable to init video", SDL_GetError(),MB_OK);
-		SDL_Quit();
-		return 1;
-	}
-
-
-	SDL_Thread *render_thread;
-
-    render_thread = SDL_CreateThread(RenderThread, NULL);
-
-	if ( render_thread == NULL )
-	{
-       
-        SDL_Quit();
-		return  1;
+    if (f > 500) {
+        return false;
     }
-
-	while(!stop)
-	{
-		SDL_Event event;
-
-		while ( SDL_PollEvent(&event) )
-		{
-			if ( event.type == SDL_QUIT )
-			{
-				stop = true;
-				break;
-			}
-		}	
-	}
-
-	SDL_WaitThread(render_thread, NULL);
-
-	SDL_Quit();
-	return 0;
+    Complex seed;
+    int m = -1;
+    Real closest = 1e20;
+    for (int i=0; i < 200; ++i) {
+        Complex tmp = RandomInRadiusAround(x, y, rad);
+        if (Evaluate(tmp, 50000)) {
+            if (Contrib() > 0) {
+                c = tmp;
+                return true;
+            }
+            for (int q=0; q < olen; ++q) {
+                Real d = orbit[q].dist2(target.x, target.y);
+                if (d < closest) {
+                    m = q;
+                    closest = d;
+                    seed = tmp;
+                }
+            }
+        }
+    }
+    return FindInitialSample(c, seed.c, seed.d, rad / 2, f + 1);
 }
 
+void RenderBuddhabrotClassic()
+{
+    static constexpr int Iterations[] = { 5000, 500, 50 };  // TODO
+    unsigned short m = 0;
+    while (true) {
+        Complex z = RandomInRadiusAround(0, 0, computeEscapeMagnitude());
+        if (Evaluate(z, 50000)) {
+            for (int c=0; c < 3; ++c) {
+                if (olen <= Iterations[c]) {
+                    DrawOrbit(c, orbit, olen);
+                    if (++m == 0) {
+                        DrawBuffer();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/***********************************************************************/
+/*                                                                     */
+/* As many disparate parts of the Mandelbrot set can produce orbits    */
+/* that pass through the screen, an optimization is to run multiple    */
+/* copies of the algorithm from different starting values; that way    */
+/* you're less likely to miss important orbits early on.               */
+/*                                                                     */
+/***********************************************************************/
+
+constexpr int metro_threads = 30;
+
+Complex z_samples[metro_threads];
+Real c_samples[metro_threads];
+Real l[metro_threads][3];
+Real o[metro_threads][3];
+
+void BuildInitialSamplePoints()
+{
+    for (int i=0; i < metro_threads; ++i) {
+        l[i][0] = o[i][0] = l[i][1] = o[i][1] = l[i][2] = o[i][2] = 1;
+
+        Complex m;
+        while (!FindInitialSample(m, 0, 0, 2, 0)) {
+            printf("Couldn't find seed %d!\n", i);
+        }
+        Evaluate(m, 50000);
+        z_samples[i] = m;
+        c_samples[i] = Contrib();
+    }
+}
+
+void RenderBuddhabrot()
+{
+    static constexpr int Iterations[] = { 50000, 5000, 500 };
+    unsigned short m = 0;
+    while (true) {
+        for (int ss = 0; ss < metro_threads; ++ss) {
+            Complex n_sample = Mutate(z_samples[ss]);
+            if (Evaluate(n_sample, 50000)) {  // it does eventually escape
+                Real n_contrib = Contrib();
+                if (n_contrib != 0) {
+                    for (int c=0; c < 3; ++c) {
+                        int it_length = Iterations[c];
+                        if (olen <= it_length) {  // it escapes within it_length iterations
+                            Real T1 = TransitionProbability(it_length, l[ss][c], olen, o[ss][c]);
+                            Real T2 = TransitionProbability(l[ss][c], it_length,  o[ss][c], olen);
+                            Real alpha = (n_contrib * T1) / (c_samples[ss] * T2);
+                            if (alpha > random(0, 1)) {
+                                c_samples[ss] = n_contrib;
+                                z_samples[ss] = n_sample;
+                                l[ss][c] = it_length;
+                                o[ss][c] = olen;
+                                DrawOrbit(c, orbit, olen);
+                                if (++m == 0) {
+                                    DrawBuffer();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // anonymous namespace
+
+int main()
+{
+    BuildInitialSamplePoints();
+    RenderBuddhabrot();
+}
