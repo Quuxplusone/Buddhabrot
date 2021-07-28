@@ -4,7 +4,11 @@
 #include <new.h>
 
 #include <algorithm>
-#include "xoshiro256ss.h"
+
+// #include "xoshiro256ss.h"
+
+#define XOSHIRO256SS_IMPLEMENTATION
+#include "xoshiro256.h"
 
 #define FOR(C_, N_) for (int C_ = 0; C_ < N_; ++C_)
 
@@ -41,13 +45,16 @@ namespace
 
     constexpr int max_orbit_length = 50000;
 
-    xoshiro256ss XOSHIRO256SS;
-
     Real random(Real lo, Real hi)
     {
+        static auto _ = []() -> bool
+        {
+            xoshiro256_jump();
+            return true;
+        }();
         assert(lo <= hi);
-        constexpr Real scale = Real(1) / Real(-1uLL);
-        Real r = Real(XOSHIRO256SS()) * scale;
+        constexpr Real scale_ = Real(1) / Real(-1uLL);
+        Real r = Real(xoshiro256_next()) * scale_;
         return lo + r * (hi - lo);
     }
 
