@@ -1,9 +1,10 @@
 #pragma once
 /*
 2021 JUL -- DBJ -- made into stand alone header
- include in exavlty one C/C++ file and 
+ include in exactly one C/C++ file and 
  #define XOSHIRO256SS_IMPLEMENTATION 
- in front of including itm in only that file
+ in front of including it in only that file
+ elsewhere just include
 
 */
 #include <stdint.h>
