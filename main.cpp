@@ -44,10 +44,11 @@ namespace
 
     constexpr BitmapProperties bitmap = {BITMAP_HEIGHT, BITMAP_WIDTH};
 
+    // I understand the aim, but ...
     // ImageReal (&image_buffer)[3][bitmap.height][bitmap.width] =
     //     *new ImageReal[1][3][bitmap.height][bitmap.width]{};
-
-    ImageReal image_buffer[3][bitmap.height][bitmap.width];
+    // this goes onto stack, it is simple, fast and perhaps dangerous
+    ImageReal image_buffer[3][BITMAP_HEIGHT][BITMAP_WIDTH];
 
     //////////////////////////////////////////////////////////////////////////////////
     struct TargetProperties
@@ -57,17 +58,20 @@ namespace
         Real zoom;
     };
 
-    constexpr TargetProperties target1 = {-0.4, 0, 0.32}; // the full set
-    constexpr TargetProperties target2 = {-1.25275, -0.343, 250};
-    constexpr TargetProperties target3 = {-0.1592, -1.0317, 80.5};
-    constexpr TargetProperties target4 = {-0.529854097, -0.667968575, 80.5};
-    constexpr TargetProperties target5 = {-0.657560793, 0.467732884, 70.5};
-    constexpr TargetProperties target6 = {-1.185768799, 0.302592593, 90.5};
-    constexpr TargetProperties target7 = {0.443108035, 0.345012263, 4000};
-    constexpr TargetProperties target8 = {-0.647663050, 0.380700836, 1275};
-    constexpr TargetProperties target9 = {-0.0443594, -0.986749, 88.2}; // steckles.com sample image
+    constexpr TargetProperties targets[] = {
+        {0, 0, 0},                          // 0 the empty set
+        {-0.4, 0, 0.32},                    // 1 the full set
+        {-1.25275, -0.343, 250},            // 2
+        {-0.1592, -1.0317, 80.5},           // 3
+        {-0.529854097, -0.667968575, 80.5}, // 4
+        {-0.657560793, 0.467732884, 70.5},  // 5
+        {-1.185768799, 0.302592593, 90.5},  // 6
+        {0.443108035, 0.345012263, 4000},   // 7
+        {-0.647663050, 0.380700836, 1275},  // 8
+        {-0.0443594, -0.986749, 88.2},      // 9 steckles.com sample image
+    };
 
-    constexpr TargetProperties target = target3;
+    constexpr TargetProperties target = targets[3];
 
     struct Complex
     {
