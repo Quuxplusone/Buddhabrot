@@ -7,15 +7,17 @@
 
 #include "xoshiro_dbj.h"
 
+// for the simple for's
 #define FOR(C_, N_) for (int C_ = 0; C_ < N_; ++C_)
 
-namespace
+#ifdef __cplusplus
+extern "C"
 {
+#endif // __cplusplus
+    typedef long double Real;
+    typedef float ImageReal;
 
-    using Real = long double;
-    using ImageReal = float;
-
-    Real random(Real lo, Real hi)
+    static inline Real random(Real lo, Real hi)
     {
         static auto once_ = []()
         {
@@ -28,7 +30,7 @@ namespace
         (void)once_;
 
         assert(lo <= hi);
-        constexpr Real scale_ = Real(1) / Real(-1uLL);
+        static Real scale_ = Real(1) / Real(-1uLL);
         Real r = Real(xoshiro_dbj_next()) * scale_;
         return lo + r * (hi - lo);
     }
@@ -36,21 +38,27 @@ namespace
 #define BITMAP_HEIGHT 640
 #define BITMAP_WIDTH 480
 
-    struct BitmapProperties
-    {
-        int height;
-        int width;
-    };
+    // struct BitmapProperties
+    // {
+    //     int height;
+    //     int width;
+    // };
 
-    constexpr BitmapProperties bitmap = {BITMAP_HEIGHT, BITMAP_WIDTH};
+    // constexpr BitmapProperties bitmap = {BITMAP_HEIGHT, BITMAP_WIDTH};
 
     // I understand the aim, but ...
-    // ImageReal (&image_buffer)[3][bitmap.height][bitmap.width] =
-    //     *new ImageReal[1][3][bitmap.height][bitmap.width]{};
-    // this goes onto stack, it is simple, fast and perhaps dangerous
+    // ImageReal (&image_buffer)[3][BITMAP_HEIGHT][BITMAP_WIDTH] =
+    //     *new ImageReal[1][3][BITMAP_HEIGHT][BITMAP_WIDTH]{};
+    // that is a mem leak, this bellow goes onto stack, it is simple, fast and perhaps dangerous
     ImageReal image_buffer[3][BITMAP_HEIGHT][BITMAP_WIDTH];
+#ifdef __cplusplus
+} // extern "C"
+#endif // __cplusplus
 
-    //////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+
     struct TargetProperties
     {
         Real x;
@@ -96,7 +104,7 @@ namespace
         int y;
         int x;
         constexpr explicit ImageCoord(int x, int y) : y(y), x(x) {}
-        bool isOnScreen() const { return (0 <= y && y < bitmap.height && 0 <= x && x < bitmap.width); }
+        bool isOnScreen() const { return (0 <= y && y < BITMAP_HEIGHT && 0 <= x && x < BITMAP_WIDTH); }
     };
 
     ImageCoord Project(const Complex &s)
@@ -104,16 +112,16 @@ namespace
         // Notice that the image is rotated 90 degrees compared to the original complex plane.
         // Negative real components (target.x) turn into upward displacements (small coord.y).
         return ImageCoord(
-            int((s.b - target.y) * target.zoom * bitmap.height + (bitmap.width / 2)),
-            int((s.a - target.x) * target.zoom * bitmap.height + (bitmap.height / 2)));
+            int((s.b - target.y) * target.zoom * BITMAP_HEIGHT + (BITMAP_WIDTH / 2)),
+            int((s.a - target.x) * target.zoom * BITMAP_HEIGHT + (BITMAP_HEIGHT / 2)));
     }
 
     constexpr Complex Unproject(ImageCoord p)
     {
         return Complex(
             0, 0,
-            (p.y - (bitmap.height / 2)) / (target.zoom * bitmap.height) + target.x,
-            (p.x - (bitmap.width / 2)) / (target.zoom * bitmap.height) + target.y);
+            (p.y - (BITMAP_HEIGHT / 2)) / (target.zoom * BITMAP_HEIGHT) + target.x,
+            (p.x - (BITMAP_WIDTH / 2)) / (target.zoom * BITMAP_HEIGHT) + target.y);
     }
 
     Complex RandomInRadiusAround(Real x, Real y, Real r)
@@ -159,10 +167,10 @@ namespace
     {
         FILE *fp = fopen(fname, "wb");
         assert(fp != nullptr);
-        fprintf(fp, "P6\n%d %d\n255\n", bitmap.width, bitmap.height);
-        FOR(y, bitmap.height)
+        fprintf(fp, "P6\n%d %d\n255\n", BITMAP_WIDTH, BITMAP_HEIGHT);
+        FOR(y, BITMAP_HEIGHT)
         {
-            FOR(x, bitmap.width)
+            FOR(x, BITMAP_WIDTH)
             {
                 unsigned char rgb[3] = {
                     GainCorrect(image_buffer[0][y][x] / max0),
@@ -180,10 +188,10 @@ namespace
     {
         FILE *fp = fopen(fname, "wb");
         assert(fp != nullptr);
-        fprintf(fp, "P5\n%d %d\n255\n", bitmap.width, bitmap.height);
-        FOR(y, bitmap.height)
+        fprintf(fp, "P5\n%d %d\n255\n", BITMAP_WIDTH, BITMAP_HEIGHT);
+        FOR(y, BITMAP_HEIGHT)
         {
-            FOR(x, bitmap.width)
+            FOR(x, BITMAP_WIDTH)
             {
                 unsigned char rgb[1] = {
                     GainCorrect(image_buffer[c][y][x] / cmax),
@@ -201,9 +209,9 @@ namespace
         ImageReal max0 = 0.01; // avoid div-by-zero on a completely black image
         ImageReal max1 = 0.01;
         ImageReal max2 = 0.01;
-        FOR(y, bitmap.height)
+        FOR(y, BITMAP_HEIGHT)
         {
-            FOR(x, bitmap.width)
+            FOR(x, BITMAP_WIDTH)
             {
                 max0 = std::max(max0, image_buffer[0][y][x]);
                 max1 = std::max(max1, image_buffer[1][y][x]);
@@ -222,9 +230,9 @@ namespace
     constexpr Real computeEscapeMagnitude2()
     {
         Real m1 = Unproject(ImageCoord{0, 0}).mag2();
-        Real m2 = Unproject(ImageCoord{bitmap.width - 1, 0}).mag2();
-        Real m3 = Unproject(ImageCoord{0, bitmap.height - 1}).mag2();
-        Real m4 = Unproject(ImageCoord{bitmap.width - 1, bitmap.height - 1}).mag2();
+        Real m2 = Unproject(ImageCoord{BITMAP_WIDTH - 1, 0}).mag2();
+        Real m3 = Unproject(ImageCoord{0, BITMAP_HEIGHT - 1}).mag2();
+        Real m4 = Unproject(ImageCoord{BITMAP_WIDTH - 1, BITMAP_HEIGHT - 1}).mag2();
         Real result = 4.0;
         if (result < m1)
             result = m1;
@@ -275,7 +283,7 @@ namespace
                 if (target.y == 0)
                 {
                     // If the region being graphed is symmetrical, then make the image symmetrical too.
-                    image_buffer[c][p.y][bitmap.width - p.x - 1] += ImageReal(1);
+                    image_buffer[c][p.y][BITMAP_WIDTH - p.x - 1] += ImageReal(1);
                 }
             }
         }
