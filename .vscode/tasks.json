@@ -6,6 +6,7 @@
 			"label": "C/C++: gcc.exe build active file",
 			"command": "D:\\PROD\\TDM-GCC-64\\bin\\g++.exe",
 			"args": [
+				"-DNDEBUG",
 				"-fno-exceptions",
 				/*"-fopenmp",*/
 				"-s",

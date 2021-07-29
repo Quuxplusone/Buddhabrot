@@ -5,10 +5,7 @@
 
 #include <algorithm>
 
-// #include "xoshiro256ss.h"
-
-#define XOSHIRO256SS_IMPLEMENTATION
-#include "xoshiro256.h"
+#include "xoshiro_dbj.h"
 
 #define FOR(C_, N_) for (int C_ = 0; C_ < N_; ++C_)
 
@@ -18,16 +15,46 @@ namespace
     using Real = long double;
     using ImageReal = float;
 
+    Real random(Real lo, Real hi)
+    {
+        static auto once_ = []()
+        {
+#ifndef NDEBUG
+            printf("\ncalling xoshiro_dbj_ctor()");
+#endif
+            xoshiro_dbj_ctor();
+            return 1;
+        }();
+        (void)once_;
+
+        assert(lo <= hi);
+        constexpr Real scale_ = Real(1) / Real(-1uLL);
+        Real r = Real(xoshiro_dbj_next()) * scale_;
+        return lo + r * (hi - lo);
+    }
+
+#define BITMAP_HEIGHT 640
+#define BITMAP_WIDTH 480
+
+    struct BitmapProperties
+    {
+        int height;
+        int width;
+    };
+
+    constexpr BitmapProperties bitmap = {BITMAP_HEIGHT, BITMAP_WIDTH};
+
+    // ImageReal (&image_buffer)[3][bitmap.height][bitmap.width] =
+    //     *new ImageReal[1][3][bitmap.height][bitmap.width]{};
+
+    ImageReal image_buffer[3][bitmap.height][bitmap.width];
+
+    //////////////////////////////////////////////////////////////////////////////////
     struct TargetProperties
     {
         Real x;
         Real y;
         Real zoom;
-    };
-    struct BitmapProperties
-    {
-        int height;
-        int width;
     };
 
     constexpr TargetProperties target1 = {-0.4, 0, 0.32}; // the full set
@@ -40,23 +67,7 @@ namespace
     constexpr TargetProperties target8 = {-0.647663050, 0.380700836, 1275};
     constexpr TargetProperties target9 = {-0.0443594, -0.986749, 88.2}; // steckles.com sample image
 
-    constexpr TargetProperties target = target1;
-    constexpr BitmapProperties bitmap = {640, 480};
-
-    constexpr int max_orbit_length = 50000;
-
-    Real random(Real lo, Real hi)
-    {
-        static auto _ = []() -> bool
-        {
-            xoshiro256_jump();
-            return true;
-        }();
-        assert(lo <= hi);
-        constexpr Real scale_ = Real(1) / Real(-1uLL);
-        Real r = Real(xoshiro256_next()) * scale_;
-        return lo + r * (hi - lo);
-    }
+    constexpr TargetProperties target = target3;
 
     struct Complex
     {
@@ -71,6 +82,10 @@ namespace
         constexpr Real mag2() const { return c * c + d * d; }
         Real dist2(Real cp, Real dp) const { return (c - cp) * (c - cp) + (d - dp) * (d - dp); }
     };
+
+    constexpr int max_orbit_length = 50000;
+    Complex orbit[max_orbit_length];
+    int olen = 0;
 
     struct ImageCoord
     {
@@ -96,12 +111,6 @@ namespace
             (p.y - (bitmap.height / 2)) / (target.zoom * bitmap.height) + target.x,
             (p.x - (bitmap.width / 2)) / (target.zoom * bitmap.height) + target.y);
     }
-
-    Complex orbit[max_orbit_length];
-    int olen = 0;
-
-    ImageReal (&image_buffer)[3][bitmap.height][bitmap.width] =
-        *new ImageReal[1][3][bitmap.height][bitmap.width]{};
 
     Complex RandomInRadiusAround(Real x, Real y, Real r)
     {
