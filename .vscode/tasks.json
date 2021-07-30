@@ -1,0 +1,34 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cppbuild",
+			"label": "C/C++: gcc.exe build active file",
+			"command": "D:\\PROD\\TDM-GCC-64\\bin\\g++.exe",
+			"args": [
+				"-DNDEBUG",
+				"-fno-exceptions",
+				/*"-fopenmp",*/
+				"-s",
+				"-O3",
+				/* "-g", */
+				"-Wall",
+				"-pedantic",
+				"${file}",
+				"-o",
+				"${fileDirname}\\${fileBasenameNoExtension}.exe"
+			],
+			"options": {
+				"cwd": "${fileDirname}"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"detail": "compiler: D:\\PROD\\TDM-GCC-64\\bin\\gcc.exe"
+		}
+	]
+}

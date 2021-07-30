@@ -1,0 +1,13 @@
+{
+    "editor.formatOnSave": true,
+    "clang-format.executable": "D:/PROD/programs/Microsoft Visual Studio/2019/Community/VC/Tools/Llvm/x64/bin/clang-format.exe",
+    "files.associations": {
+        "*.go": "go",
+        "array": "cpp",
+        "vector": "cpp",
+        "xstring": "cpp",
+        "xutility": "cpp",
+        "assert.h": "c",
+        "bit": "cpp"
+    }
+}
