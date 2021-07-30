@@ -38,18 +38,10 @@ extern "C"
 #define BITMAP_HEIGHT 640
 #define BITMAP_WIDTH 480
 
-    // struct BitmapProperties
-    // {
-    //     int height;
-    //     int width;
-    // };
-
-    // constexpr BitmapProperties bitmap = {BITMAP_HEIGHT, BITMAP_WIDTH};
-
     // I understand the aim, but ...
     // ImageReal (&image_buffer)[3][BITMAP_HEIGHT][BITMAP_WIDTH] =
     //     *new ImageReal[1][3][BITMAP_HEIGHT][BITMAP_WIDTH]{};
-    // that is a mem leak, this bellow goes onto stack, it is simple, fast and perhaps dangerous
+    // that was a mem leak, this bellow goes onto stack, it is simple, fast and perhaps dangerous
     ImageReal image_buffer[3][BITMAP_HEIGHT][BITMAP_WIDTH];
 #ifdef __cplusplus
 } // extern "C"
